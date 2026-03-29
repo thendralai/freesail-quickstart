@@ -1,0 +1,5 @@
+.claude
+.vscode
+.freesail_logs
+.env
+node_modules/
