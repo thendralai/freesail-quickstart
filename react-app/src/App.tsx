@@ -2,9 +2,10 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ReactUI } from 'freesail';
 import { StandardCatalog } from '@freesail/standard-catalog';
 import { ChatCatalog } from '@freesail/chat-catalog';
+import {WeatherCatalog} from "@freesail-community/weather-catalog";
 
 const CHAT_CATALOG_ID = ChatCatalog.namespace;
-const ALL_CATALOGS: ReactUI.CatalogDefinition[] = [StandardCatalog, ChatCatalog];
+const ALL_CATALOGS: ReactUI.CatalogDefinition[] = [StandardCatalog, ChatCatalog, WeatherCatalog];
 
 function getGatewayUrl(): string {
   const gatewayUrl = import.meta.env['VITE_GATEWAY_URL'] as string | undefined;
@@ -86,13 +87,12 @@ function App() {
 
   const chatMin = Math.floor(windowWidth * 0.25);
   const chatMax = Math.floor(windowWidth * 0.5);
-  const chat = useDrag(340, chatMin, chatMax, 'right');
+  const chat = useDrag(Math.floor(windowWidth * 0.4), chatMin, chatMax, 'right');
 
   return (
     <ReactUI.FreesailThemeProvider theme={themeMode}>
       <ReactUI.FreesailProvider
-        gateway={getGatewayUrl()}
-        catalogDefinitions={ALL_CATALOGS}
+        catalogs={ALL_CATALOGS}
         onConnectionChange={(connected) => console.log('Connection status:', connected)}
         onError={(error) => console.error('Freesail error:', error)}
       >
@@ -120,9 +120,6 @@ function AppLayout({
   setThemeMode: (m: 'light' | 'dark') => void;
   chat: ReturnType<typeof useDrag>;
 }) {
-  const allSurfaces = ReactUI.useSurfaces();
-  const hasSidebar = allSurfaces.some(s => !s.id.startsWith('__'));
-
   return (
     <div style={{
       display: 'flex',
@@ -130,14 +127,13 @@ function AppLayout({
       overflow: 'hidden',
       userSelect: chat.isDraggingRef.current ? 'none' : 'auto',
     }}>
-      {/* Chat panel — full width when no sidebar, fixed width otherwise */}
+      {/* Chat panel — fixed width on the left */}
       <div style={{
-        ...(hasSidebar
-          ? { width: `${chat.width}px`, flexShrink: 0 }
-          : { flex: 1 }),
+        width: `${chat.width}px`,
+        flexShrink: 0,
         display: 'flex',
         flexDirection: 'column',
-        borderRight: hasSidebar ? '1px solid var(--freesail-border)' : 'none',
+        borderRight: '1px solid var(--freesail-border)',
       }}>
         <ChatPanelHeader themeMode={themeMode} setThemeMode={setThemeMode} />
         <div style={{ flex: 1, overflow: 'hidden', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
@@ -145,15 +141,13 @@ function AppLayout({
         </div>
       </div>
 
-      {/* Chat drag handle — only when sidebar is visible */}
-      {hasSidebar && <ResizeHandle onMouseDown={chat.onMouseDown} />}
+      {/* Resize handle */}
+      <ResizeHandle onMouseDown={chat.onMouseDown} />
 
-      {/* Sidebar fills remaining space */}
-      {hasSidebar && (
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minWidth: 0 }}>
-          <SurfaceSidebar />
-        </div>
-      )}
+      {/* Right panel — promo by default, surfaces when available */}
+      <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minWidth: 0 }}>
+        <SurfaceSidebar />
+      </div>
     </div>
   );
 }
@@ -310,30 +304,142 @@ function labelFromSurfaceId(surfaceId: string): string {
   return spaced.toUpperCase().replace('SURFACE','');
 }
 
+const ATTENTION_STYLES = `
+  @keyframes fs-ping {
+    0%   { transform: scale(1);   opacity: 0.8; }
+    70%  { transform: scale(2.4); opacity: 0; }
+    100% { transform: scale(2.4); opacity: 0; }
+  }
+  @keyframes fs-tab-glow {
+    0%, 100% { box-shadow: 0 2px 0 0 var(--freesail-primary); opacity: 1; }
+    50%       { box-shadow: 0 2px 8px 2px var(--freesail-primary); opacity: 0.7; }
+  }
+`;
+
+// ============================================================================
+// FreesailPromo — shown in the right panel before any agent surfaces appear
+// ============================================================================
+
+function FreesailPromo() {
+  return (
+    <div style={{
+      flex: 1,
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '28px',
+      padding: '40px 32px',
+      backgroundColor: 'var(--freesail-bg-surface)',
+      color: 'var(--freesail-text-main)',
+      textAlign: 'center',
+    }}>
+      <img src='/assets/favicon.ico' height='56px' alt='Freesail' style={{ opacity: 0.9 }} />
+
+      <div>
+        <div style={{ fontSize: '22px', fontWeight: '700', marginBottom: '8px', letterSpacing: '-0.3px' }}>
+          Freesail
+        </div>
+        <div style={{ fontSize: '14px', color: 'var(--freesail-text-muted)', lineHeight: '1.6', maxWidth: '320px' }}>
+          Agent-driven UI — let your AI agent build and update this panel in real time as the conversation unfolds.
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%', maxWidth: '300px' }}>
+        {[
+          { icon: '⚡', title: 'Live surfaces', desc: 'Agents push UI components directly into this panel.' },
+          { icon: '🔌', title: 'Any stack', desc: 'Works with any LLM or agent framework via the gateway.' },
+          { icon: '🧩', title: 'Extensible', desc: 'Bring your own component catalogs alongside the built-ins.' },
+        ].map(({ icon, title, desc }) => (
+          <div key={title} style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '12px',
+            padding: '12px 14px',
+            borderRadius: 'var(--freesail-radius)',
+            backgroundColor: 'var(--freesail-bg-muted, rgba(0,0,0,0.04))',
+            textAlign: 'left',
+          }}>
+            <span style={{ fontSize: '18px', flexShrink: 0 }}>{icon}</span>
+            <div>
+              <div style={{ fontSize: '13px', fontWeight: '600', marginBottom: '2px' }}>{title}</div>
+              <div style={{ fontSize: '12px', color: 'var(--freesail-text-muted)', lineHeight: '1.5' }}>{desc}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ fontSize: '11px', color: 'var(--freesail-text-muted)' }}>
+        Start chatting — agent surfaces will appear here.
+      </div>
+    </div>
+  );
+}
+
 function SurfaceSidebar() {
   const allSurfaces = ReactUI.useSurfaces();
   const agentSurfaces = allSurfaces.filter(s => !s.id.startsWith('__'));
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [attentionIds, setAttentionIds] = useState<Set<string>>(new Set());
   const { surfaceManager } = ReactUI.useFreesailContext();
+  const activeIdRef = useRef<string | null>(null);
+  const hasActiveSurfaceRef = useRef<boolean>(false);
 
-  // Switch to whichever agent surface was most recently updated
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+
+  useEffect(() => {
+    hasActiveSurfaceRef.current = activeId !== null && agentSurfaces.some(s => s.id === activeId);
+  }, [activeId, agentSurfaces]);
+
+  useEffect(() => {
+    if (document.getElementById('fs-attention-styles')) return;
+    const el = document.createElement('style');
+    el.id = 'fs-attention-styles';
+    el.textContent = ATTENTION_STYLES;
+    document.head.appendChild(el);
+  }, []);
+
+  // Auto-switch if no active surface; otherwise highlight the tab
   useEffect(() => {
     const handler = (surfaceId: string) => {
-      if (!surfaceId.startsWith('__')) setActiveId(surfaceId);
+      if (surfaceId.startsWith('__')) return;
+      if (!hasActiveSurfaceRef.current) {
+        setActiveId(surfaceId);
+        setAttentionIds(prev => { const next = new Set(prev); next.delete(surfaceId); return next; });
+      } else if (surfaceId !== activeIdRef.current) {
+        setAttentionIds(prev => {
+          if (prev.has(surfaceId)) return prev;
+          const next = new Set(prev);
+          next.add(surfaceId);
+          return next;
+        });
+      }
     };
+    const createdHandler = (surface: { id: string }) => handler(surface.id);
     const unsubComponents = surfaceManager.on('componentsUpdated', handler);
     const unsubData = surfaceManager.on('dataModelUpdated', handler);
-    return () => { unsubComponents(); unsubData(); };
+    const unsubCreated = surfaceManager.on('surfaceCreated', createdHandler);
+    return () => { unsubComponents(); unsubData(); unsubCreated(); };
   }, [surfaceManager]);
 
-  // Fallback: if active surface was deleted, switch to first available
+  // When active surface is deleted, clear activeId so next activity auto-switches
   useEffect(() => {
-    if (agentSurfaces.length > 0 && (!activeId || !agentSurfaces.find(s => s.id === activeId))) {
-      setActiveId(agentSurfaces[0].id);
+    if (activeId && !agentSurfaces.find(s => s.id === activeId)) {
+      setActiveId(null);
     }
   }, [agentSurfaces, activeId]);
 
-  if (agentSurfaces.length === 0) return null;
+  const handleTabClick = (id: string) => {
+    setActiveId(id);
+    setAttentionIds(prev => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  };
+
+  if (agentSurfaces.length === 0) return <FreesailPromo />;
 
   return (
     <div style={{
@@ -351,11 +457,14 @@ function SurfaceSidebar() {
           flexShrink: 0,
           scrollbarWidth: 'none',
         }}>
-          {agentSurfaces.map(surface => (
+          {agentSurfaces.map(surface => {
+            const hasAttention = attentionIds.has(surface.id) && activeId !== surface.id;
+            return (
             <button
               key={surface.id}
-              onClick={() => setActiveId(surface.id)}
+              onClick={() => handleTabClick(surface.id)}
               style={{
+                position: 'relative',
                 padding: '8px 16px',
                 border: 'none',
                 borderBottom: activeId === surface.id
@@ -364,17 +473,40 @@ function SurfaceSidebar() {
                 background: 'transparent',
                 color: activeId === surface.id
                   ? 'var(--freesail-text-main)'
-                  : 'var(--freesail-text-muted)',
+                  : hasAttention
+                    ? 'var(--freesail-primary)'
+                    : 'var(--freesail-text-muted)',
                 cursor: 'pointer',
                 fontSize: '13px',
-                fontWeight: activeId === surface.id ? '500' : 'normal',
+                fontWeight: (activeId === surface.id || hasAttention) ? '600' : 'normal',
                 whiteSpace: 'nowrap',
                 flexShrink: 0,
+                animation: hasAttention ? 'fs-tab-glow 1.2s ease-in-out infinite' : 'none',
               }}
             >
               {labelFromSurfaceId(surface.id)}
+              {hasAttention && (
+                <span style={{ position: 'relative', display: 'inline-block', width: 8, height: 8, marginLeft: 6, verticalAlign: 'middle' }}>
+                  {/* Solid core dot */}
+                  <span style={{
+                    position: 'absolute',
+                    inset: 0,
+                    borderRadius: '50%',
+                    backgroundColor: 'var(--freesail-primary)',
+                  }} />
+                  {/* Sonar ping ring */}
+                  <span style={{
+                    position: 'absolute',
+                    inset: 0,
+                    borderRadius: '50%',
+                    backgroundColor: 'var(--freesail-primary)',
+                    animation: 'fs-ping 1.2s ease-out infinite',
+                  }} />
+                </span>
+              )}
             </button>
-          ))}
+            );
+          })}
         </div>
 
         {/* Surface panels */}

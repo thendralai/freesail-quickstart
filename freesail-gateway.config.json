@@ -1,0 +1,18 @@
+{
+  "httpPort": 3001,
+  "httpHost": "0.0.0.0",
+  "mcpMode": "http",
+  "mcpPort": 3000,
+  "mcpHost": "127.0.0.1",
+  "sessionTimeout": 60,
+  "reconnectGracePeriod": 180,
+  "bodyLimit": "5mb",
+  "log": {
+    "level": "info",
+    "filters": {
+      "session.client-surface": "warn",
+      "mcp": "warn"
+    }
+  }
+  
+}

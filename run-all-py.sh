@@ -1,12 +1,12 @@
 #!/bin/bash
-# Run the complete Freesail stack: Gateway + Agent + UI
-# Usage: ./run-all.sh
+# Run the complete Freesail stack: Gateway + Python Agent + UI
+# Usage: ./run-all-py.sh
 #
-# Configure via .env in this directory (copy .env.example to agent/.env).
+# Configure via .env in this directory (copy .env.example to .env).
 #
 # The gateway, agent, and UI all run as independent processes:
 #   - Gateway: MCP Streamable HTTP (port 3000, localhost only) + A2UI HTTP/SSE (port 3001, all interfaces)
-#   - Agent:   Connects to gateway MCP
+#   - Agent:   Python LangChain agent — connects to gateway MCP
 #   - UI:      Vite dev server (port 5173, all interfaces)
 
 set -e
@@ -111,7 +111,6 @@ for _filter in ${LOG_FILTER:-}; do
 done
 
 # 1. Start Gateway (standalone process)
-# Gateway HTTP binds to 0.0.0.0 (all interfaces) by default; MCP stays on localhost.
 echo -e "${BLUE}[Gateway]${NC} Starting on HTTP port ${GATEWAY_HTTP_PORT}, MCP port ${GATEWAY_MCP_PORT}"
 npx freesail run gateway "${GATEWAY_ARGS[@]}" &
 GATEWAY_PID=$!
@@ -120,11 +119,13 @@ GATEWAY_PID=$!
 echo -e "${BLUE}[Gateway]${NC} Waiting for gateway to start..."
 sleep 3
 
-# 2. Start Agent (connects to gateway via MCP SSE)
-echo -e "${BLUE}[Agent]${NC} Starting"
-cd "$SCRIPT_DIR/agent"
-npm run dev &
+# 2. Start Python Agent
+echo -e "${BLUE}[Agent]${NC} Starting Python agent"
+cd "$SCRIPT_DIR/python-agent"
+pip install -q -r requirements.txt
+python main.py &
 AGENT_PID=$!
+cd "$SCRIPT_DIR"
 
 # Wait for agent to connect
 sleep 3

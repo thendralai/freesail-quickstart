@@ -1,0 +1,40 @@
+{
+  "name": "freesail-quickstart",
+  "version": "0.7.0",
+  "private": true,
+  "description": "Quickstart example for Freesail Agent-driven UI",
+  "scripts": {
+    "clean": "npm run clean --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present"
+  },
+  "keywords": [
+    "ai",
+    "agent-driven ui",
+    "generative ui",
+    "a2ui",
+    "agent"
+  ],
+  "author": "Thendral AI Ltd",
+  "contributors": [
+    "Shanmugam Sudalaimuthu"
+  ],
+  "license": "MIT",
+  "workspaces": [
+    "./agent",
+    "./react-app"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "glob": "^13.0.3",
+    "prettier": "^3.1.0",
+    "typescript": "^5.3.0"
+   },
+  "dependencies": {
+    "@freesail/gateway": "^0.7.0",
+    "@freesail/logger": "^0.7.0",
+    "freesail": "^0.7.0"
+  }
+}

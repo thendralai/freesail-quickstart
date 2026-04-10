@@ -96,7 +96,6 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
       return;
     }
 
-    // All other UI actions are formatted into a natural-language message
     const contextStr =
       action.context && Object.keys(action.context).length > 0
         ? `\nAction data: ${JSON.stringify(action.context, null, 2)}`
@@ -106,9 +105,22 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
         ? `\nClient data model: ${JSON.stringify(action.clientDataModel, null, 2)}`
         : '';
 
-    const message =
-      `[UI Action] The user clicked "${action.name}" on component ` +
-      `"${action.sourceComponentId}" in surface "${action.surfaceId}".${contextStr}${dataModelStr}`;
+    // System actions (sourceComponentId === '__system') are directives from the
+    // framework, not user interactions. Format them as explicit correction
+    // instructions so the LLM calls the right tool rather than replying in chat.
+    let message: string;
+    if (action.sourceComponentId === '__system') {
+      const hint = (action.context as { message?: string })?.message ?? '';
+      message =
+        `[System Directive] The Freesail framework sent a "${action.name}" ` +
+        `notification for surface "${action.surfaceId}". ` +
+        `You MUST call the appropriate tool to fix this — do NOT reply in chat.\n` +
+        `${hint}${contextStr}`;
+    } else {
+      message =
+        `[UI Action] The user clicked "${action.name}" on component ` +
+        `"${action.sourceComponentId}" in surface "${action.surfaceId}".${contextStr}${dataModelStr}`;
+    }
 
     logger.info(`[${this.sessionId}] Action: ${action.name}`);
     await this.handleChat(message, false);
@@ -144,9 +156,9 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
         `[Session Context] The following message is from session "${this.sessionId}". ` +
         `When calling ANY tool (create_surface, update_components, update_data_model, delete_surface), ` +
         `you MUST use sessionId: "${this.sessionId}". Do NOT reuse a sessionId from a previous message.\n` +
-        `IMPORTANT: Do NOT create or modify the "__chat" surface — it is managed by the client. ` +
         `Just reply normally in chat for standard conversation. ` +
         `Only create new surfaces when you think the user needs visual UI.\n\n` +
+        `Today's date is ${new Date().toLocaleDateString()}\n\n` +
         `User: ${message}`;
 
       const response = await this.chat(sessionPrompt, {
