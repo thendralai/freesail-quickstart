@@ -1,7 +1,7 @@
 import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { FreesailAgent, ActionEvent } from '@freesail/agent-runtime';
+import type { FreesailAgent, SessionNotification } from '@freesail/agent-runtime';
 import { SharedCache } from '@freesail/agent-runtime';
 import type { DynamicStructuredTool } from '@langchain/core/tools';
 import { NativeLogger } from '@freesail/logger';
@@ -58,6 +58,12 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
   private conversationHistory: (HumanMessage | AIMessage | ToolMessage)[] = [];
   private chatMessages: Array<{ role: string; content: string; timestamp: string }> = [];
 
+  // Interrupt queue: actions/errors that arrive while the agent is mid-turn are
+  // held here and injected into the tool-use loop at the next iteration boundary,
+  // so the agent sees them before deciding on its next tool call.
+  private pendingInterrupts: string[] = [];
+  private isHandlingChat = false;
+
   constructor(sessionId: string, config: FreesailLangchainAgentConfig) {
     this.sessionId = sessionId;
     this.mcpClient = config.mcpClient;
@@ -86,8 +92,21 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
     logger.info(`[${sessionId}] Session disconnected — agent state cleared`);
   }
 
-  async onAction(action: ActionEvent): Promise<void> {
-    // Route chat_send on __chat surface → conversational reply
+  async onSessionNotification(notification: SessionNotification): Promise<void> {
+    if (notification.type === 'error') {
+      const { event } = notification;
+      const message =
+        `[System Error] The client reported an error on surface "${event.surfaceId}": ` +
+        `${event.code} — ${event.message}` +
+        (event.path ? ` (path: ${event.path})` : '');
+      logger.info(`[${this.sessionId}] Client error: ${event.code} on ${event.surfaceId}`);
+      await this.enqueueInterrupt(message);
+      return;
+    }
+
+    const { event: action } = notification;
+
+    // Route chat_send on __chat surface — conversational reply (always starts a new turn)
     if (action.name === 'chat_send' && action.surfaceId === '__chat') {
       const chatText = (action.context as { text?: string })?.text;
       if (chatText) {
@@ -96,6 +115,13 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
       return;
     }
 
+    // Log capabilities when they are set
+    if (action.name === '__capabilities_set') {
+      logger.info(`[${this.sessionId}] Capabilities: ${JSON.stringify(action.context['capabilities'])}`);
+      return;
+    }
+
+    // All other UI actions — interrupt queue
     const contextStr =
       action.context && Object.keys(action.context).length > 0
         ? `\nAction data: ${JSON.stringify(action.context, null, 2)}`
@@ -105,25 +131,32 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
         ? `\nClient data model: ${JSON.stringify(action.clientDataModel, null, 2)}`
         : '';
 
-    // System actions (sourceComponentId === '__system') are directives from the
-    // framework, not user interactions. Format them as explicit correction
-    // instructions so the LLM calls the right tool rather than replying in chat.
-    let message: string;
-    if (action.sourceComponentId === '__system') {
-      const hint = (action.context as { message?: string })?.message ?? '';
-      message =
-        `[System Directive] The Freesail framework sent a "${action.name}" ` +
-        `notification for surface "${action.surfaceId}". ` +
-        `You MUST call the appropriate tool to fix this — do NOT reply in chat.\n` +
-        `${hint}${contextStr}`;
-    } else {
-      message =
-        `[UI Action] The user clicked "${action.name}" on component ` +
-        `"${action.sourceComponentId}" in surface "${action.surfaceId}".${contextStr}${dataModelStr}`;
-    }
+    const message =
+      `[UI Action] The user clicked "${action.name}" on component ` +
+      `"${action.sourceComponentId}" in surface "${action.surfaceId}".${contextStr}${dataModelStr}`;
 
     logger.info(`[${this.sessionId}] Action: ${action.name}`);
-    await this.handleChat(message, false);
+    await this.enqueueInterrupt(message);
+  }
+
+  // ============================================================================
+  // Interrupt queue
+  // ============================================================================
+
+  /**
+   * Enqueue an interrupt (action or error) for the agent to process.
+   *
+   * If the agent is currently mid-turn, the message is held in pendingInterrupts
+   * and injected into the tool-use loop at the next iteration boundary — before
+   * the LLM decides on its next tool call. If the agent is idle, a new turn is
+   * started immediately.
+   */
+  private async enqueueInterrupt(message: string): Promise<void> {
+    this.pendingInterrupts.push(message);
+    if (!this.isHandlingChat) {
+      const interrupts = this.pendingInterrupts.splice(0);
+      await this.handleChat(interrupts.join('\n'), false);
+    }
   }
 
   // ============================================================================
@@ -142,15 +175,18 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
   // ============================================================================
 
   private async handleChat(message: string, isUserChat: boolean): Promise<void> {
+    this.isHandlingChat = true;
     try {
       if (isUserChat) {
         this.chatMessages.push({ role: 'user', content: message, timestamp: new Date().toISOString() });
       }
 
       // Full update: show user message + activate AgentStream
-      await this.updateChatModel('/', {
-        messages: [...this.chatMessages], isTyping: true, stream: { token: '', active: true },
-      });
+      await Promise.all([
+        this.updateChatModel('/messages', [...this.chatMessages]),
+        this.updateChatModel('/isTyping', true),
+        this.updateChatModel('/stream', { token: '', active: true }),
+      ]);
 
       const sessionPrompt =
         `[Session Context] The following message is from session "${this.sessionId}". ` +
@@ -158,7 +194,6 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
         `you MUST use sessionId: "${this.sessionId}". Do NOT reuse a sessionId from a previous message.\n` +
         `Just reply normally in chat for standard conversation. ` +
         `Only create new surfaces when you think the user needs visual UI.\n\n` +
-        `Today's date is ${new Date().toLocaleDateString()}\n\n` +
         `User: ${message}`;
 
       const response = await this.chat(sessionPrompt, {
@@ -175,15 +210,26 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
 
       logger.info(`[${this.sessionId}] Assistant: ${response?.slice(0, 120)}...`);
 
-      await this.updateChatModel('/', {
-        messages: [...this.chatMessages], isTyping: false, stream: { token: '', active: false },
-      });
+      await Promise.all([
+        this.updateChatModel('/messages', [...this.chatMessages]),
+        this.updateChatModel('/isTyping', false),
+        this.updateChatModel('/stream', { token: '', active: false }),
+      ]);
     } catch (error) {
       logger.error(`[${this.sessionId}] Chat error:`, error);
       this.chatMessages.push({ role: 'assistant', content: 'An error occurred.', timestamp: new Date().toISOString() });
-      await this.updateChatModel('/', {
-        messages: [...this.chatMessages], isTyping: false, stream: { token: '', active: false },
-      });
+      await Promise.all([
+        this.updateChatModel('/messages', [...this.chatMessages]),
+        this.updateChatModel('/isTyping', false),
+        this.updateChatModel('/stream', { token: '', active: false }),
+      ]);
+    } finally {
+      this.isHandlingChat = false;
+      // Drain any interrupts that arrived while we were processing
+      if (this.pendingInterrupts.length > 0) {
+        const interrupts = this.pendingInterrupts.splice(0);
+        await this.handleChat(interrupts.join('\n'), false);
+      }
     }
   }
 
@@ -243,7 +289,7 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
 
     const messages = [new SystemMessage(systemPrompt), ...this.conversationHistory];
     let responseChunk = await this.streamModelResponse(modelWithTools, messages, callbacks?.onToken);
-    const turnToolMessages: (AIMessage | ToolMessage)[] = [];
+    const turnToolMessages: (AIMessage | ToolMessage | HumanMessage)[] = [];
 
     while (responseChunk?.tool_calls?.length > 0) {
       turnToolMessages.push(new AIMessage({
@@ -271,6 +317,14 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
       }
 
       turnToolMessages.push(...toolMessages);
+
+      // Inject any interrupts (actions/errors) that arrived during tool execution
+      // as a HumanMessage before asking the LLM what to do next.
+      if (this.pendingInterrupts.length > 0) {
+        const interrupts = this.pendingInterrupts.splice(0);
+        turnToolMessages.push(new HumanMessage(interrupts.join('\n')));
+      }
+
       responseChunk = await this.streamModelResponse(
         modelWithTools,
         [new SystemMessage(systemPrompt), ...this.conversationHistory, ...turnToolMessages],
@@ -278,7 +332,7 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
       );
     }
 
-    this.conversationHistory.push(...turnToolMessages);
+    this.conversationHistory.push(...turnToolMessages as (AIMessage | ToolMessage | HumanMessage)[]);
 
     const assistantMessage =
       typeof responseChunk?.content === 'string'

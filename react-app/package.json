@@ -1,6 +1,6 @@
 {
   "name": "freesail-react-quickstarter",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,13 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@freesail/chat-catalog": "^0.7.0",
-    "@freesail/core": "^0.7.0",
-    "@freesail/logger": "^0.7.0",
-    "@freesail/react": "^0.7.0",
-    "@freesail/standard-catalog": "^0.7.0",
-    "@freesail-community/weather-catalog": "^0.7.0",
-    "freesail": "^0.7.0",
+    "@freesail/chat-catalog": "^0.8.0",
+    "@freesail/core": "^0.8.0",
+    "@freesail/logger": "^0.8.0",
+    "@freesail/react": "^0.8.0",
+    "@freesail/standard-catalog": "^0.8.0",
+    "@freesail-community/weather-catalog": "^0.8.0",
+    "freesail": "^0.8.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },

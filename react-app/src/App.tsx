@@ -90,8 +90,8 @@ function App() {
   const chat = useDrag(Math.floor(windowWidth * 0.4), chatMin, chatMax, 'right');
 
   return (
-    <ReactUI.FreesailThemeProvider theme={themeMode}>
       <ReactUI.FreesailProvider
+        theme={themeMode}
         catalogs={ALL_CATALOGS}
         onConnectionChange={(connected) => console.log('Connection status:', connected)}
         onError={(error) => console.error('Freesail error:', error)}
@@ -103,7 +103,6 @@ function App() {
           chat={chat}
         />
       </ReactUI.FreesailProvider>
-    </ReactUI.FreesailThemeProvider>
   );
 }
 
@@ -173,7 +172,7 @@ function ChatPanelHeader({
       padding: '6px 10px',
       borderBottom: '1px solid var(--freesail-border)',
       flexShrink: 0,
-      backgroundColor: 'var(--freesail-bg-surface)',
+      backgroundColor: 'var(--freesail-bg)',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         <div style={{
@@ -330,7 +329,7 @@ function FreesailPromo() {
       justifyContent: 'center',
       gap: '28px',
       padding: '40px 32px',
-      backgroundColor: 'var(--freesail-bg-surface)',
+      backgroundColor: 'var(--freesail-bg)',
       color: 'var(--freesail-text-main)',
       textAlign: 'center',
     }}>
@@ -356,7 +355,7 @@ function FreesailPromo() {
             alignItems: 'flex-start',
             gap: '12px',
             padding: '12px 14px',
-            borderRadius: 'var(--freesail-radius)',
+            borderRadius: 'var(--freesail-radius-md)',
             backgroundColor: 'var(--freesail-bg-muted, rgba(0,0,0,0.04))',
             textAlign: 'left',
           }}>
@@ -446,7 +445,7 @@ function SurfaceSidebar() {
       flex: 1,
       display: 'flex',
       flexDirection: 'column',
-      backgroundColor: 'var(--freesail-bg-surface)',
+      backgroundColor: 'var(--freesail-bg)',
       overflow: 'hidden',
     }}>
         {/* Tab bar */}

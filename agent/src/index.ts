@@ -122,12 +122,12 @@ logger.info(`MCP prompts: ${prompts.map(p => p.name).join(', ')}`);
 // toolsFactory is passed here so the cache stays framework-agnostic in agentruntime
 const sharedCache = new SharedCache<any[]>(mcpClient, () => LangChainAdapter.getTools(mcpClient));
 
-// The gateway sends resources/list_changed on every upstream UI action
-// (to signal pending actions in the mcp://freesail.dev/actions/{sessionId} resource).
+// The gateway sends resources/list_changed on every upstream UI action.
+// Use it as a fallback to drain sessions whose per-session subscription failed.
 // Catalog content is fetched on-demand via get_catalogs — no cache invalidation needed.
 mcpClient.setNotificationHandler<any>(
   z.object({ method: z.literal('notifications/resources/list_changed') }).passthrough(),
-  async () => {}
+  async () => { await runtime.pollPendingActions(); }
 );
 
 
