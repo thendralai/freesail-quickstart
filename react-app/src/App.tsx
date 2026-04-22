@@ -516,7 +516,7 @@ function SurfaceSidebar() {
               display: activeId === surface.id ? 'flex' : 'none',
               flex: 1,
               overflow: 'auto',
-              minHeight: 0,
+              minHeight: '90%',
             }}
           >
             <ReactUI.FreesailSurface surfaceId={surface.id} />
