@@ -1,11 +1,11 @@
 {
   "name": "freesail-quickstart",
-  "version": "0.8.0",
+  "version": "0.8.6",
   "private": true,
   "description": "Quickstart example for Freesail Agent-driven UI",
   "scripts": {
     "clean": "npm run clean --workspaces --if-present",
-    "build": "npm run build --workspaces --if-present"
+    "build": "npm install && npm run build --workspaces --if-present"
   },
   "keywords": [
     "ai",
@@ -31,10 +31,11 @@
     "glob": "^13.0.3",
     "prettier": "^3.1.0",
     "typescript": "^5.3.0"
-   },
+  },
   "dependencies": {
     "@freesail/gateway": "^0.8.0",
     "@freesail/logger": "^0.8.0",
-    "freesail": "^0.8.0"
-  }
+    "freesail": "^0.8.0",
+    "vite": "^8.0.7"
+  }  
 }

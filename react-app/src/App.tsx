@@ -144,7 +144,7 @@ function AppLayout({
       <ResizeHandle onMouseDown={chat.onMouseDown} />
 
       {/* Right panel — promo by default, surfaces when available */}
-      <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minWidth: 0 }}>
+      <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <SurfaceSidebar />
       </div>
     </div>
@@ -183,6 +183,11 @@ function ChatPanelHeader({
           flexShrink: 0,
         }} />
         <img src='/assets/favicon.ico' height='30px' alt='Freesail'/>
+        <span style={{
+          fontSize: '15px',
+          fontWeight: 600,
+          color: 'var(--freesail-text-foreground)',
+        }}>Chat</span>
       </div>
       <div style={{ display: 'flex', gap: '2px' }}>
         {(['light', 'dark'] as const).map((mode) => (
@@ -199,8 +204,8 @@ function ChatPanelHeader({
                 ? 'var(--freesail-bg-muted, rgba(0,0,0,0.08))'
                 : 'transparent',
               color: themeMode === mode
-                ? 'var(--freesail-text-main)'
-                : 'var(--freesail-text-muted)',
+                ? 'var(--freesail-text-foreground)'
+                : 'var(--freesail-text-secondary)',
               fontWeight: themeMode === mode ? '500' : 'normal',
             }}
           >
@@ -251,7 +256,7 @@ function ChatBootstrapper() {
       {
         id: 'root',
         component: 'ChatContainer',
-        title: 'Chat',
+       
         height: '100%',
         children: ['message_list', 'agent_stream', 'typing', 'chat_input'],
       },
@@ -330,7 +335,7 @@ function FreesailPromo() {
       gap: '28px',
       padding: '40px 32px',
       backgroundColor: 'var(--freesail-bg)',
-      color: 'var(--freesail-text-main)',
+      color: 'var(--freesail-text-foreground)',
       textAlign: 'center',
     }}>
       <img src='/assets/favicon.ico' height='56px' alt='Freesail' style={{ opacity: 0.9 }} />
@@ -339,7 +344,7 @@ function FreesailPromo() {
         <div style={{ fontSize: '22px', fontWeight: '700', marginBottom: '8px', letterSpacing: '-0.3px' }}>
           Freesail
         </div>
-        <div style={{ fontSize: '14px', color: 'var(--freesail-text-muted)', lineHeight: '1.6', maxWidth: '320px' }}>
+        <div style={{ fontSize: '14px', color: 'var(--freesail-text-secondary)', lineHeight: '1.6', maxWidth: '320px' }}>
           Agent-driven UI — let your AI agent build and update this panel in real time as the conversation unfolds.
         </div>
       </div>
@@ -362,13 +367,13 @@ function FreesailPromo() {
             <span style={{ fontSize: '18px', flexShrink: 0 }}>{icon}</span>
             <div>
               <div style={{ fontSize: '13px', fontWeight: '600', marginBottom: '2px' }}>{title}</div>
-              <div style={{ fontSize: '12px', color: 'var(--freesail-text-muted)', lineHeight: '1.5' }}>{desc}</div>
+              <div style={{ fontSize: '12px', color: 'var(--freesail-text-secondary)', lineHeight: '1.5' }}>{desc}</div>
             </div>
           </div>
         ))}
       </div>
 
-      <div style={{ fontSize: '11px', color: 'var(--freesail-text-muted)' }}>
+      <div style={{ fontSize: '11px', color: 'var(--freesail-text-secondary)' }}>
         Start chatting — agent surfaces will appear here.
       </div>
     </div>
@@ -447,14 +452,15 @@ function SurfaceSidebar() {
       flexDirection: 'column',
       backgroundColor: 'var(--freesail-bg)',
       overflow: 'hidden',
+      paddingLeft: '16px',
     }}>
         {/* Tab bar */}
         <div style={{
           display: 'flex',
           overflowX: 'auto',
-          borderBottom: '1px solid var(--freesail-border)',
           flexShrink: 0,
           scrollbarWidth: 'none',
+          paddingBottom: '8px',
         }}>
           {agentSurfaces.map(surface => {
             const hasAttention = attentionIds.has(surface.id) && activeId !== surface.id;
@@ -470,11 +476,10 @@ function SurfaceSidebar() {
                   ? '2px solid var(--freesail-primary)'
                   : '2px solid transparent',
                 background: 'transparent',
-                color: activeId === surface.id
-                  ? 'var(--freesail-text-main)'
-                  : hasAttention
-                    ? 'var(--freesail-primary)'
-                    : 'var(--freesail-text-muted)',
+                color: hasAttention
+                  ? 'var(--freesail-primary)'
+                  : 'var(--freesail-text-foreground)',
+                opacity: activeId === surface.id || hasAttention ? 1 : 0.6,
                 cursor: 'pointer',
                 fontSize: '13px',
                 fontWeight: (activeId === surface.id || hasAttention) ? '600' : 'normal',
@@ -513,10 +518,10 @@ function SurfaceSidebar() {
           <div
             key={surface.id}
             style={{
-              display: activeId === surface.id ? 'flex' : 'none',
+              display: activeId === surface.id ? 'block' : 'none',
               flex: 1,
               overflow: 'auto',
-              minHeight: '90%',
+              minHeight: 0,
             }}
           >
             <ReactUI.FreesailSurface surfaceId={surface.id} />

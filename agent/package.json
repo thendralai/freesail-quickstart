@@ -1,6 +1,6 @@
 {
   "name": "freesail-quickstarter-agent",
-  "version": "0.8.0",
+  "version": "0.8.6",
   "private": true,
   "description": "Example LangChain agent for Freesail — supports Gemini and OpenAI",
   "type": "module",
