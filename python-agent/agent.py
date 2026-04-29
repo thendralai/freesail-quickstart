@@ -243,24 +243,30 @@ class FreesailLangchainSessionAgent:
         stream = model_with_tools.astream(messages)
         final_chunk: Any = None
 
-        async for chunk in stream:
-            content = getattr(chunk, "content", "")
-            if isinstance(content, str) and content:
-                if on_token:
-                    on_token(content)
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
-                        if on_token:
-                            on_token(part["text"])
+        try:
+            async for chunk in stream:
+                content = getattr(chunk, "content", "")
+                if isinstance(content, str) and content:
+                    if on_token:
+                        on_token(content)
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
+                            if on_token:
+                                on_token(part["text"])
 
-            if final_chunk is None:
-                final_chunk = chunk
-            else:
-                try:
-                    final_chunk = final_chunk + chunk
-                except Exception:
-                    final_chunk = chunk  # fallback: keep last chunk
+                if final_chunk is None:
+                    final_chunk = chunk
+                else:
+                    try:
+                        final_chunk = final_chunk + chunk
+                    except Exception:
+                        final_chunk = chunk  # fallback: keep last chunk
+        except (AttributeError, TypeError) as exc:
+            # langchain-google-genai sometimes emits a trailing finish-reason chunk
+            # with no candidate content, raising on 'parts'. Treat as clean stream end.
+            if "parts" not in str(exc):
+                raise
 
         return _extract_gemini_tool_calls(final_chunk)
 

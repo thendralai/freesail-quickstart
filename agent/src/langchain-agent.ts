@@ -255,19 +255,42 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
     messages: any[],
     onToken?: (token: string) => void,
   ): Promise<any> {
-    const stream = await modelWithTools.stream(messages);
     let finalChunk: any | null = null;
-    let accumulatedContent = '';
 
-    for await (const chunk of stream) {
+    // LangChain's stream() calls AsyncGeneratorWithSetup which eagerly fires
+    // generator.next() as part of its setup promise. If Gemini emits a bad
+    // trailing chunk on that first pull, the TypeError propagates through
+    // stream() itself — not through iter.next() — so we must catch both sites.
+    let stream: any;
+    try {
+      stream = await modelWithTools.stream(messages);
+    } catch (err) {
+      if (err instanceof TypeError && err.message.includes("'parts'")) {
+        return extractGeminiToolCalls(finalChunk);
+      }
+      throw err;
+    }
+
+    const iter = stream[Symbol.asyncIterator]();
+    while (true) {
+      let next: IteratorResult<any>;
+      try {
+        next = await iter.next();
+      } catch (err) {
+        // Gemini sometimes emits a trailing finish-reason chunk with no candidate
+        // content, causing @langchain/google-genai to throw "Cannot read properties
+        // of undefined (reading 'parts')". Treat it as a clean stream end.
+        if (err instanceof TypeError && err.message.includes("'parts'")) break;
+        throw err;
+      }
+      if (next.done) break;
+      const chunk = next.value;
       if (typeof chunk.content === 'string' && chunk.content) {
         onToken?.(chunk.content);
-        accumulatedContent += chunk.content;
       } else if (Array.isArray(chunk.content)) {
         for (const part of chunk.content) {
           if (part.type === 'text' && part.text) {
             onToken?.(part.text);
-            accumulatedContent += part.text;
           }
         }
       }
