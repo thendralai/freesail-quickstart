@@ -39,6 +39,8 @@ interface FreesailLangchainAgentConfig {
   model: BaseChatModel;
   /** Shared cache for system prompt and tools — mutex-safe across concurrent sessions */
   sharedCache: SharedCache<DynamicStructuredTool[]>;
+  /** Optional custom prompt text loaded from customprompt.txt at startup */
+  customPrompt?: string;
 }
 
 /**
@@ -53,6 +55,7 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
   private mcpClient: Client;
   private model: BaseChatModel;
   private sharedCache: SharedCache<DynamicStructuredTool[]>;
+  private customPrompt: string;
 
   // Per-session state
   private conversationHistory: (HumanMessage | AIMessage | ToolMessage)[] = [];
@@ -69,6 +72,7 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
     this.mcpClient = config.mcpClient;
     this.model = config.model;
     this.sharedCache = config.sharedCache;
+    this.customPrompt = config.customPrompt ?? '';
   }
 
   // ============================================================================
@@ -188,13 +192,18 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
         this.updateChatModel('/stream', { token: '', active: true }),
       ]);
 
+      const customPromptSection = this.customPrompt.trim()
+        ? `\n\n${this.customPrompt.trim()}`
+        : '';
+
       const sessionPrompt =
         `[Session Context] The following message is from session "${this.sessionId}". ` +
         `When calling ANY tool (create_surface, update_components, update_data_model, delete_surface), ` +
         `you MUST use sessionId: "${this.sessionId}". Do NOT reuse a sessionId from a previous message.\n` +
         `Just reply normally in chat for standard conversation. ` +
-        `Only create new surfaces when you think the user needs visual UI.\n\n` +
-        `User: ${message}`;
+        `Only create new surfaces when you think the user needs visual UI.` +
+        customPromptSection +
+        `\n\nUser: ${message}`;
 
       const response = await this.chat(sessionPrompt, {
         onToken: (token: string) => {
@@ -362,7 +371,7 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
         ? responseChunk.content
         : Array.isArray(responseChunk?.content)
           ? responseChunk.content.map((p: any) => p.text ?? '').join('')
-          : JSON.stringify(responseChunk?.content ?? '');
+          : '';
 
     if (assistantMessage?.trim()) {
       this.conversationHistory.push(new AIMessage(assistantMessage));

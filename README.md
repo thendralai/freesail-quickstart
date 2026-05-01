@@ -16,7 +16,10 @@ A minimal, fully working Freesail application — chat panel on the left, AI-dri
 
 ## Prerequisites
 
-- **Node.js 18+** and **npm** (gateway + UI)
+- **Node.js 18+** and **npm** (gateway + UI). `npx` is used to start the gateway and is bundled with npm — verify it is available by running `npx --version`. If it is missing, install it with:
+  ```bash
+  npm install -g npx
+  ```
 - **Python 3.11+** (only if using the Python agent)
 - An API key for one of the supported LLM providers:
   - [Google Gemini](https://aistudio.google.com/app/apikey) (default)
@@ -33,9 +36,8 @@ Choose either the **TypeScript agent** or the **Python agent** — both are feat
 
 **1. Install dependencies**
 
-```bash
-cd react-app && npm install && cd ..
-cd agent && npm install && cd ..
+```
+npm install
 ```
 
 **2. Configure your API key**
@@ -58,19 +60,35 @@ bash run-all.sh
 
 ### Option B: Python agent
 
-**1. Install dependencies**
+**1. Create and activate a virtual environment**
 
 ```bash
 # Linux / macOS
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+```powershell
+# Windows (PowerShell)
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+**2. Install dependencies**
+
+```bash
+# Linux / macOS
+pip install -r python-agent/requirements.txt
 cd react-app && npm install && cd ..
 ```
 
 ```powershell
 # Windows (PowerShell)
+pip install -r python-agent\requirements.txt
 cd react-app; npm install; cd ..
 ```
 
-**2. Configure your API key**
+**3. Configure your API key**
 
 ```bash
 cp .env.example .env      # Linux / macOS
@@ -81,7 +99,9 @@ Copy-Item .env.example .env   # Windows (PowerShell)
 
 Open `.env` and fill in your API key (see [Configuration](#configuration) below).
 
-**3. Start the stack**
+**4. Start the stack**
+
+> Make sure the virtual environment from step 1 is still active before running.
 
 ```bash
 # Linux / macOS
@@ -120,6 +140,39 @@ All configuration lives in `.env` at the project root (copied from `.env.example
 | `LLM_TEMPERATURE` | `0.7` | Sampling temperature |
 | `GATEWAY_PORT` | `3001` | Gateway HTTP/SSE port |
 | `MCP_PORT` | `3000` | Gateway MCP port (agent only, localhost) |
+| `CUSTOM_PROMPT_FILE` | `customprompt.txt` | Path to a custom prompt file (relative to project root, or absolute) |
+
+---
+
+## Custom prompt
+
+You can inject additional instructions into every session prompt without editing agent code.
+
+1. Copy the example file and edit it:
+
+```bash
+cp customprompt.txt.example customprompt.txt
+```
+
+2. Write your instructions in plain text. The content is appended to the agent's session context before each user message — use it to set a persona, restrict scope, define UI preferences, or add domain knowledge:
+
+```
+You are a helpful assistant for a sales dashboard application.
+Keep responses concise and data-focused. When creating UI surfaces,
+prefer tables and bar charts. Always label axes and include units.
+```
+
+3. Restart the agent. The file is read once at startup and applied to all sessions.
+
+To use a different file, set `CUSTOM_PROMPT_FILE` in `.env`:
+
+```bash
+CUSTOM_PROMPT_FILE=prompts/my-app.txt   # relative to project root
+# or
+CUSTOM_PROMPT_FILE=/absolute/path/to/prompt.txt
+```
+
+If `customprompt.txt` is absent or empty, the agent behaves as normal with no extra instructions.
 
 ---
 
@@ -154,6 +207,8 @@ The Freesail gateway runs as a standalone process, exposing an MCP endpoint (por
 ```
 freesail-quickstart/
 ├── .env.example              # Copy to .env and fill in your API key
+├── customprompt.txt.example  # Copy to customprompt.txt to add custom agent instructions
+├── customprompt.txt          # (gitignored) your custom prompt — loaded at agent startup
 ├── run-all.sh                # Starts gateway + TS agent + UI (Linux/macOS)
 ├── run-all.ps1               # Starts gateway + TS agent + UI (Windows)
 ├── run-all-py.sh         # Starts gateway + Python agent + UI (Linux/macOS)
@@ -181,7 +236,4 @@ freesail-quickstart/
 │   ├── runtime.py            # Session runtime (FreesailAgentRuntime + SharedCache)
 │   ├── agent.py              # Per-session agent (chat + tool loop)
 │   └── adapter.py            # Wraps MCP tools as LangChain StructuredTools
-├── run-all-py.sh         # Starts gateway + Python agent + UI (Linux/macOS)
-└── run-all-py.ps1        # Starts gateway + Python agent + UI (Windows)
-
 ```

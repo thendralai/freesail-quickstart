@@ -78,11 +78,13 @@ class FreesailLangchainSessionAgent:
         mcp_session: ClientSession,
         model: Any,
         shared_cache: SharedCache,
+        custom_prompt: str = "",
     ) -> None:
         self._session_id = session_id
         self._mcp_session = mcp_session
         self._model = model
         self._shared_cache = shared_cache
+        self._custom_prompt = custom_prompt
 
         # Per-session state
         self._conversation_history: list[HumanMessage | AIMessage | ToolMessage] = []
@@ -182,13 +184,18 @@ class FreesailLangchainSessionAgent:
                 "stream": {"token": "", "active": True},
             })
 
+            custom_prompt_section = (
+                f"\n\n{self._custom_prompt.strip()}" if self._custom_prompt.strip() else ""
+            )
+
             session_prompt = (
                 f'[Session Context] The following message is from session "{self._session_id}". '
                 f"When calling ANY tool (create_surface, update_components, update_data_model, delete_surface), "
                 f'you MUST use sessionId: "{self._session_id}". Do NOT reuse a sessionId from a previous message.\n'
                 f"Just reply normally in chat for standard conversation. "
                 f"Only create new surfaces when you think the user needs visual UI.\n\n"
-                f"Today's date is {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n\n"
+                f"Today's date is {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+                f"{custom_prompt_section}\n\n"
                 f"User: {message}"
             )
 
@@ -345,7 +352,7 @@ class FreesailLangchainSessionAgent:
         elif isinstance(content, str):
             assistant_message = content
         else:
-            assistant_message = json.dumps(content) if content else ""
+            assistant_message = ""
 
         if assistant_message.strip():
             self._conversation_history.append(AIMessage(assistant_message))

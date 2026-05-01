@@ -1,6 +1,6 @@
 {
   "name": "freesail-quickstart",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "private": true,
   "description": "Quickstart example for Freesail Agent-driven UI",
   "scripts": {

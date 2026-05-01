@@ -51,6 +51,23 @@ GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "3001"))
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").lower()
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.7"))
 
+# Custom prompt — loaded once at startup.
+# Path resolved from CUSTOM_PROMPT_FILE env var, or defaults to customprompt.txt in the project root.
+_project_root = Path(__file__).resolve().parent.parent
+_custom_prompt_env = os.environ.get("CUSTOM_PROMPT_FILE", "")
+if _custom_prompt_env:
+    _custom_prompt_path = Path(_custom_prompt_env) if Path(_custom_prompt_env).is_absolute() else _project_root / _custom_prompt_env
+else:
+    _custom_prompt_path = _project_root / "customprompt.txt"
+CUSTOM_PROMPT = ""
+try:
+    _content = _custom_prompt_path.read_text(encoding="utf-8").strip()
+    if _content:
+        CUSTOM_PROMPT = _content
+        logger.info("Loaded custom prompt from %s (%d chars)", _custom_prompt_path, len(_content))
+except OSError:
+    pass
+
 
 # ============================================================================
 # LLM provider selection
@@ -126,6 +143,7 @@ async def main() -> None:
             mcp_session=_mcp_session_ref[0],
             model=model,
             shared_cache=_shared_cache_ref[0],
+            custom_prompt=CUSTOM_PROMPT,
         )
 
     async with streamablehttp_client(mcp_url) as (read_stream, write_stream, _):

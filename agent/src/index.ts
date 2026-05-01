@@ -19,12 +19,33 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { FreesailAgentRuntime, SharedCache } from '@freesail/agent-runtime';
 import { FreesailLangchainSessionAgent } from './langchain-agent.js';
 import { LangChainAdapter } from './langchain-adapter.js';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
 await configure({
   sinks: { console: getConsoleSink() },
   loggers: [{ category: [], sinks: ['console'], level: 'info' }],
 });
 const logger = new NativeLogger('freesail-agent');
+
+// Custom prompt — loaded once at startup.
+// Path resolved from CUSTOM_PROMPT_FILE env var, or defaults to customprompt.txt in the project root.
+const _agentDir = dirname(fileURLToPath(import.meta.url));
+const _projectRoot = join(_agentDir, '../..');
+const _customPromptPath = process.env['CUSTOM_PROMPT_FILE']
+  ? (process.env['CUSTOM_PROMPT_FILE'].startsWith('/') ? process.env['CUSTOM_PROMPT_FILE'] : join(_projectRoot, process.env['CUSTOM_PROMPT_FILE']))
+  : join(_projectRoot, 'customprompt.txt');
+let customPrompt = '';
+try {
+  const content = readFileSync(_customPromptPath, 'utf-8').trim();
+  if (content) {
+    customPrompt = content;
+    logger.info(`Loaded custom prompt from ${_customPromptPath} (${content.length} chars)`);
+  }
+} catch {
+  // File absent or unreadable — custom prompt stays empty
+}
 
 // Configuration
 const MCP_PORT = parseInt(process.env['MCP_PORT'] ?? '3000', 10);
@@ -142,6 +163,7 @@ const runtime = new FreesailAgentRuntime({
       mcpClient,
       model,
       sharedCache,
+      customPrompt,
     }),
 });
 
