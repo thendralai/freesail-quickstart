@@ -453,6 +453,7 @@ function SurfaceSidebar() {
       backgroundColor: 'var(--freesail-bg)',
       overflow: 'hidden',
       paddingLeft: '16px',
+      paddingRight: '16px',
     }}>
         {/* Tab bar */}
         <div style={{
