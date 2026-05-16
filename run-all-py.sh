@@ -112,6 +112,14 @@ done
 
 # 1. Start Gateway (standalone process)
 echo -e "${BLUE}[Gateway]${NC} Starting on HTTP port ${GATEWAY_HTTP_PORT}, MCP port ${GATEWAY_MCP_PORT}"
+for _port in $GATEWAY_HTTP_PORT $GATEWAY_MCP_PORT; do
+  _pid=$(lsof -ti tcp:"$_port" 2>/dev/null || true)
+  if [ -n "$_pid" ]; then
+    echo -e "${YELLOW}[Gateway]${NC} Port ${_port} in use by PID ${_pid}, killing..."
+    kill "$_pid" 2>/dev/null || true
+    sleep 1
+  fi
+done
 npx freesail run gateway "${GATEWAY_ARGS[@]}" &
 GATEWAY_PID=$!
 
@@ -121,9 +129,15 @@ sleep 3
 
 # 2. Start Python Agent
 echo -e "${BLUE}[Agent]${NC} Starting Python agent"
+VENV_DIR="$SCRIPT_DIR/.venv"
+if ! "$VENV_DIR/bin/python" -c "" 2>/dev/null; then
+  echo -e "${BLUE}[Agent]${NC} Creating Python virtual environment..."
+  rm -rf "$VENV_DIR"
+  python3 -m venv "$VENV_DIR"
+fi
+"$VENV_DIR/bin/python" -m pip install -q -r "$SCRIPT_DIR/python-agent/requirements.txt"
 cd "$SCRIPT_DIR/python-agent"
-pip install -q -r requirements.txt
-python main.py &
+"$VENV_DIR/bin/python" main.py &
 AGENT_PID=$!
 cd "$SCRIPT_DIR"
 

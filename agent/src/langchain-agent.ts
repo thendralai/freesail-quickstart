@@ -1,9 +1,8 @@
 import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { FreesailAgent, SessionNotification } from '@freesail/agent-runtime';
-import { SharedCache } from '@freesail/agent-runtime';
+import type { FreesailAgent, FreesailSessionClient, FreesailToolProvider, SessionNotification } from '@freesail/agent-runtime';
 import type { DynamicStructuredTool } from '@langchain/core/tools';
+import { LangChainAdapter } from './langchain-adapter.js';
 import { NativeLogger } from '@freesail/logger';
 
 const logger = new NativeLogger('langchain-agent');
@@ -33,12 +32,12 @@ function extractGeminiToolCalls(finalChunk: any): any {
 }
 
 interface FreesailLangchainAgentConfig {
-  /** The connected MCP Client instance */
-  mcpClient: Client;
+  /** Typed session client for this agent's claimed session */
+  session: FreesailSessionClient;
   /** The Langchain Chat Model (e.g. ChatOpenAI, ChatAnthropic, ChatGoogleGenerativeAI) */
   model: BaseChatModel;
-  /** Shared cache for system prompt and tools — mutex-safe across concurrent sessions */
-  sharedCache: SharedCache<DynamicStructuredTool[]>;
+  /** Runtime provider for system prompt and tool definitions (shared across sessions) */
+  runtime: FreesailToolProvider;
   /** Optional custom prompt text loaded from customprompt.txt at startup */
   customPrompt?: string;
 }
@@ -52,10 +51,11 @@ interface FreesailLangchainAgentConfig {
  */
 export class FreesailLangchainSessionAgent implements FreesailAgent {
   private sessionId: string;
-  private mcpClient: Client;
+  private session: FreesailSessionClient;
   private model: BaseChatModel;
-  private sharedCache: SharedCache<DynamicStructuredTool[]>;
+  private runtime: FreesailToolProvider;
   private customPrompt: string;
+  private _boundTools: Promise<DynamicStructuredTool[]> | null = null;
 
   // Per-session state
   private conversationHistory: (HumanMessage | AIMessage | ToolMessage)[] = [];
@@ -69,9 +69,9 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
 
   constructor(sessionId: string, config: FreesailLangchainAgentConfig) {
     this.sessionId = sessionId;
-    this.mcpClient = config.mcpClient;
+    this.session = config.session;
     this.model = config.model;
-    this.sharedCache = config.sharedCache;
+    this.runtime = config.runtime;
     this.customPrompt = config.customPrompt ?? '';
   }
 
@@ -80,11 +80,6 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
   // ============================================================================
 
   async onSessionConnected(sessionId: string): Promise<void> {
-    // Invalidate the cache so this session fetches the latest catalog list.
-    // A new session may have registered catalogs that weren't present before;
-    // the MCP notification fires the invalidation too, but this closes the
-    // race window where the poll could fire before the notification arrives.
-    this.sharedCache.invalidate();
     logger.info(`[${sessionId}] Session connected — agent ready`);
   }
 
@@ -110,7 +105,7 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
 
     const { event: action } = notification;
 
-    // Route chat_send on __chat surface — conversational reply (always starts a new turn)
+    // Route chat_send on __chat surface → conversational reply (always starts a new turn)
     if (action.name === 'chat_send' && action.surfaceId === '__chat') {
       const chatText = (action.context as { text?: string })?.text;
       if (chatText) {
@@ -125,7 +120,7 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
       return;
     }
 
-    // All other UI actions — interrupt queue
+    // All other UI actions → interrupt queue
     const contextStr =
       action.context && Object.keys(action.context).length > 0
         ? `\nAction data: ${JSON.stringify(action.context, null, 2)}`
@@ -167,11 +162,8 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
   // Chat data model helpers
   // ============================================================================
 
-  private updateChatModel(path: string, value: unknown): Promise<unknown> {
-    return this.mcpClient.callTool({
-      name: 'update_data_model',
-      arguments: { surfaceId: '__chat', sessionId: this.sessionId, path, value },
-    });
+  private updateChatModel(path: string, value: unknown): Promise<void> {
+    return this.session.updateDataModel('__chat', path, value);
   }
 
   // ============================================================================
@@ -247,16 +239,16 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
   // ============================================================================
 
   private getSystemPrompt(): Promise<string> {
-    return this.sharedCache.getSystemPrompt();
+    return this.runtime.getSystemPrompt();
   }
 
   private getTools(): Promise<DynamicStructuredTool[]> {
-    return this.sharedCache.getTools();
-  }
-
-  /** Invalidates the shared prompt/tool cache (e.g. when catalogs change upstream). */
-  invalidateCache(): void {
-    this.sharedCache.invalidate();
+    if (!this._boundTools) {
+      this._boundTools = this.runtime.getToolDefinitions()
+        .then((defs: import('@freesail/agent-runtime').ToolDefinition[]) => LangChainAdapter.bindTools(defs, this.session))
+        .catch((err: unknown) => { this._boundTools = null; throw err; });
+    }
+    return this._boundTools!;
   }
 
   private async streamModelResponse(
@@ -264,46 +256,29 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
     messages: any[],
     onToken?: (token: string) => void,
   ): Promise<any> {
+    const stream = await modelWithTools.stream(messages);
     let finalChunk: any | null = null;
 
-    // LangChain's stream() calls AsyncGeneratorWithSetup which eagerly fires
-    // generator.next() as part of its setup promise. If Gemini emits a bad
-    // trailing chunk on that first pull, the TypeError propagates through
-    // stream() itself — not through iter.next() — so we must catch both sites.
-    let stream: any;
     try {
-      stream = await modelWithTools.stream(messages);
-    } catch (err) {
-      if (err instanceof TypeError && err.message.includes("'parts'")) {
-        return extractGeminiToolCalls(finalChunk);
-      }
-      throw err;
-    }
-
-    const iter = stream[Symbol.asyncIterator]();
-    while (true) {
-      let next: IteratorResult<any>;
-      try {
-        next = await iter.next();
-      } catch (err) {
-        // Gemini sometimes emits a trailing finish-reason chunk with no candidate
-        // content, causing @langchain/google-genai to throw "Cannot read properties
-        // of undefined (reading 'parts')". Treat it as a clean stream end.
-        if (err instanceof TypeError && err.message.includes("'parts'")) break;
-        throw err;
-      }
-      if (next.done) break;
-      const chunk = next.value;
-      if (typeof chunk.content === 'string' && chunk.content) {
-        onToken?.(chunk.content);
-      } else if (Array.isArray(chunk.content)) {
-        for (const part of chunk.content) {
-          if (part.type === 'text' && part.text) {
-            onToken?.(part.text);
+      for await (const chunk of stream) {
+        if (typeof chunk.content === 'string' && chunk.content) {
+          onToken?.(chunk.content);
+        } else if (Array.isArray(chunk.content)) {
+          for (const part of chunk.content) {
+            if (part.type === 'text' && part.text) {
+              onToken?.(part.text);
+            }
           }
         }
+        finalChunk = finalChunk ? finalChunk.concat(chunk) : chunk;
       }
-      finalChunk = finalChunk ? finalChunk.concat(chunk) : chunk;
+    } catch (err) {
+      // Gemini sometimes emits a trailing finish-reason chunk with no candidate
+      // content, causing @langchain/google-genai to throw "Cannot read properties
+      // of undefined (reading 'parts')". Treat it as a clean stream end.
+      if (!(err instanceof TypeError && err.message.includes("'parts'"))) {
+        throw err;
+      }
     }
 
     return extractGeminiToolCalls(finalChunk);
@@ -371,7 +346,7 @@ export class FreesailLangchainSessionAgent implements FreesailAgent {
         ? responseChunk.content
         : Array.isArray(responseChunk?.content)
           ? responseChunk.content.map((p: any) => p.text ?? '').join('')
-          : '';
+          : JSON.stringify(responseChunk?.content ?? '');
 
     if (assistantMessage?.trim()) {
       this.conversationHistory.push(new AIMessage(assistantMessage));

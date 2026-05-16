@@ -1,24 +1,17 @@
 /**
  * @fileoverview Freesail Agent Server
  *
- * Connects to the Freesail gateway via MCP HTTP SSE transport.
- * The gateway runs as a separate process — this agent connects to it
- * over HTTP rather than spawning it as a child process.
+ * Connects to the Freesail gateway via the agent runtime.
+ * The runtime manages MCP client creation internally — one coordinator
+ * client for session discovery, and one dedicated client per claimed session.
  *
- * Chat communication flows through the A2UI protocol via a __chat surface
- * rather than a separate HTTP endpoint. When a client connects, the agent
- * runtime creates a new FreesailLangchainSessionAgent for that session
- * via the factory pattern, achieving full per-session state isolation.
+ * Chat communication flows through the A2UI protocol via a __chat surface.
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { z } from 'zod';
 import { NativeLogger, getConsoleSink, configure } from '@freesail/logger';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { FreesailAgentRuntime, SharedCache } from '@freesail/agent-runtime';
+import { FreesailAgentRuntime } from '@freesail/agent-runtime';
 import { FreesailLangchainSessionAgent } from './langchain-agent.js';
-import { LangChainAdapter } from './langchain-adapter.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -50,6 +43,7 @@ try {
 // Configuration
 const MCP_PORT = parseInt(process.env['MCP_PORT'] ?? '3000', 10);
 const GATEWAY_PORT = parseInt(process.env['GATEWAY_PORT'] ?? '3001', 10);
+const AGENT_ID = 'freesail-quickstart-agent';
 
 // ============================================================================
 // LLM Provider Selection
@@ -72,12 +66,7 @@ if (LLM_PROVIDER === 'openai') {
   }
   const { ChatOpenAI } = await import('@langchain/openai');
   const openaiModel = process.env['OPENAI_MODEL'] ?? 'gpt-4o';
-  model = new ChatOpenAI({
-    apiKey: OPENAI_API_KEY,
-    model: openaiModel,
-    temperature: LLM_TEMPERATURE,
-    streaming: true,
-  });
+  model = new ChatOpenAI({ apiKey: OPENAI_API_KEY, model: openaiModel, temperature: LLM_TEMPERATURE, streaming: true });
   logger.info(`LLM provider: OpenAI (${openaiModel})`);
 } else if (LLM_PROVIDER === 'claude') {
   const ANTHROPIC_API_KEY = process.env['ANTHROPIC_API_KEY'];
@@ -87,15 +76,9 @@ if (LLM_PROVIDER === 'openai') {
   }
   const { ChatAnthropic } = await import('@langchain/anthropic');
   const claudeModel = process.env['CLAUDE_MODEL'] ?? 'claude-sonnet-4-5-20250929';
-  model = new ChatAnthropic({
-    anthropicApiKey: ANTHROPIC_API_KEY,
-    model: claudeModel,
-    temperature: LLM_TEMPERATURE,
-    streaming: true,
-  });
+  model = new ChatAnthropic({ anthropicApiKey: ANTHROPIC_API_KEY, model: claudeModel, temperature: LLM_TEMPERATURE, streaming: true });
   logger.info(`LLM provider: Anthropic Claude (${claudeModel})`);
 } else {
-  // Default: Gemini
   const GOOGLE_API_KEY = process.env['GOOGLE_API_KEY'];
   if (!GOOGLE_API_KEY) {
     logger.fatal('GOOGLE_API_KEY environment variable is required when LLM_PROVIDER=gemini (default). Set it with: export GOOGLE_API_KEY=your-api-key');
@@ -103,84 +86,35 @@ if (LLM_PROVIDER === 'openai') {
   }
   const { ChatGoogleGenerativeAI } = await import('@langchain/google-genai');
   const geminiModel = process.env['GEMINI_MODEL'] ?? 'gemini-2.5-pro';
-  model = new ChatGoogleGenerativeAI({
-    apiKey: GOOGLE_API_KEY,
-    model: geminiModel,
-    temperature: LLM_TEMPERATURE,
-  });
+  model = new ChatGoogleGenerativeAI({ apiKey: GOOGLE_API_KEY, model: geminiModel, temperature: LLM_TEMPERATURE });
   logger.info(`LLM provider: Google Gemini (${geminiModel})`);
 }
 
-// ============================================================================
-// MCP Client Setup — connect to gateway via HTTP SSE
-// ============================================================================
+logger.info(`Connecting to Freesail gateway at http://localhost:${MCP_PORT}/mcp ...`);
 
-logger.info(`Connecting to Freesail gateway MCP at http://localhost:${MCP_PORT}/mcp ...`);
-
-const transport = new StreamableHTTPClientTransport(
-  new URL(`http://localhost:${MCP_PORT}/mcp`)
-);
-
-const mcpClient = new Client(
-  { name: 'freesail-agent', version: '0.1.0' },
-  { capabilities: {} }
-);
-
-await mcpClient.connect(transport);
-logger.info('Connected to gateway MCP server via SSE');
-
-const { tools } = await mcpClient.listTools();
-logger.info(`MCP tools: ${tools.map(t => t.name).join(', ')}`);
-
-const { prompts } = await mcpClient.listPrompts();
-logger.info(`MCP prompts: ${prompts.map(p => p.name).join(', ')}`);
-
-// ============================================================================
-// Shared cache — fetched once and reused across all session agents
-// ============================================================================
-
-// Shared cache for system prompt and tools — deduplication mutex built in
-// toolsFactory is passed here so the cache stays framework-agnostic in agentruntime
-const sharedCache = new SharedCache<any[]>(mcpClient, () => LangChainAdapter.getTools(mcpClient));
-
-// The gateway sends resources/list_changed on every upstream UI action.
-// Use it as a fallback to drain sessions whose per-session subscription failed.
-// Catalog content is fetched on-demand via get_catalogs — no cache invalidation needed.
-mcpClient.setNotificationHandler<any>(
-  z.object({ method: z.literal('notifications/resources/list_changed') }).passthrough(),
-  async () => { await runtime.pollPendingActions(); }
-);
-
-
-// ============================================================================
-// Agent Runtime — session-based factory pattern
-// ============================================================================
-
-const runtime = new FreesailAgentRuntime({
-  mcpClient,
-  agentFactory: (sessionId) =>
-    new FreesailLangchainSessionAgent(sessionId, {
-      mcpClient,
-      model,
-      sharedCache,
-      customPrompt,
-    }),
+const runtime: FreesailAgentRuntime = new FreesailAgentRuntime({
+  gatewayUrl: `http://localhost:${MCP_PORT}/mcp`,
+  clientInfo: { name: 'freesail-agent', version: '0.1.0' },
+  agentFactory: (sessionId, session) =>
+    new FreesailLangchainSessionAgent(sessionId, { session, model, runtime, customPrompt }),
 });
 
-runtime.start();
+await runtime.start();
+logger.info('Connected to gateway');
 
 logger.info(`Chat flows through A2UI __chat surface`);
-logger.info(`Gateway MCP: http://localhost:${MCP_PORT}/mcp (SSE)`);
+logger.info(`Gateway MCP: http://localhost:${MCP_PORT}/mcp`);
 logger.info(`Gateway HTTP: http://localhost:${GATEWAY_PORT}`);
+logger.info(`Agent ID: ${AGENT_ID}`);
 
 process.on('SIGINT', async () => {
   logger.info('Shutting down...');
-  try { await mcpClient.close(); } catch {}
+  try { await runtime.stop(); } catch {}
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   logger.info('Shutting down...');
-  try { await mcpClient.close(); } catch {}
+  try { await runtime.stop(); } catch {}
   process.exit(0);
 });

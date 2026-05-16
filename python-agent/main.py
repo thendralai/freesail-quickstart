@@ -1,13 +1,10 @@
 """
 Freesail Python Agent — entry point.
 
-Connects to the Freesail gateway via MCP HTTP Streamable transport.
-The gateway runs as a separate process; this agent connects to it over HTTP.
+Connects to the Freesail gateway via the agent runtime.
+The runtime manages the MCP connection internally.
 
-Chat communication flows through the A2UI protocol via a __chat surface
-rather than a separate HTTP endpoint. When a client connects, the runtime
-creates a new FreesailLangchainSessionAgent for that session via the factory
-pattern, achieving full per-session state isolation.
+Chat communication flows through the A2UI protocol via a __chat surface.
 
 Mirrors agent/src/index.ts.
 """
@@ -21,7 +18,6 @@ import signal
 import sys
 from pathlib import Path
 
-# Load .env from the project root (one directory above python-agent/)
 from dotenv import load_dotenv
 
 _env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -38,8 +34,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("freesail-agent")
 
-# Suppress expected shutdown noise from the MCP SDK's internal reconnect/termination
-# logic — these fire on every clean Ctrl+C and are not actionable.
+# Suppress expected shutdown noise from the MCP SDK's internal reconnect/termination logic.
 logging.getLogger("mcp.client.streamable_http").setLevel(logging.ERROR)
 
 # ============================================================================
@@ -48,6 +43,7 @@ logging.getLogger("mcp.client.streamable_http").setLevel(logging.ERROR)
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "3001"))
+AGENT_ID = "freesail-quickstart-agent"
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").lower()
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.7"))
 
@@ -56,7 +52,11 @@ LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.7"))
 _project_root = Path(__file__).resolve().parent.parent
 _custom_prompt_env = os.environ.get("CUSTOM_PROMPT_FILE", "")
 if _custom_prompt_env:
-    _custom_prompt_path = Path(_custom_prompt_env) if Path(_custom_prompt_env).is_absolute() else _project_root / _custom_prompt_env
+    _custom_prompt_path = (
+        Path(_custom_prompt_env)
+        if Path(_custom_prompt_env).is_absolute()
+        else _project_root / _custom_prompt_env
+    )
 else:
     _custom_prompt_path = _project_root / "customprompt.txt"
 CUSTOM_PROMPT = ""
@@ -117,78 +117,44 @@ def _build_model() -> object:
 # ============================================================================
 
 async def main() -> None:
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
-
-    from adapter import MCPAdapter
     from agent import FreesailLangchainSessionAgent
-    from runtime import FreesailAgentRuntime, SharedCache
+    from runtime import FreesailAgentRuntime
 
     model = _build_model()
 
     mcp_url = f"http://localhost:{MCP_PORT}/mcp"
-    logger.info("Connecting to Freesail gateway MCP at %s ...", mcp_url)
+    logger.info("Connecting to Freesail gateway at %s ...", mcp_url)
 
-    # Create the runtime first so its message_handler can be passed to ClientSession.
-    # The session and shared_cache are injected after the session is initialised.
-    runtime = FreesailAgentRuntime(agent_factory=lambda sid: _make_agent(sid))
-
-    # Placeholders — filled in once the session is ready (before runtime.start())
-    _mcp_session_ref: list[ClientSession] = []
-    _shared_cache_ref: list[SharedCache] = []
-
-    def _make_agent(session_id: str) -> FreesailLangchainSessionAgent:
-        return FreesailLangchainSessionAgent(
+    runtime = FreesailAgentRuntime(
+        gateway_url=mcp_url,
+        client_info={"name": "freesail-agent", "version": "0.1.0"},
+        agent_factory=lambda session_id, session: FreesailLangchainSessionAgent(
             session_id=session_id,
-            mcp_session=_mcp_session_ref[0],
+            session=session,
             model=model,
-            shared_cache=_shared_cache_ref[0],
+            runtime=runtime,
             custom_prompt=CUSTOM_PROMPT,
-        )
+        ),
+    )
 
-    async with streamablehttp_client(mcp_url) as (read_stream, write_stream, _):
-        async with ClientSession(
-            read_stream,
-            write_stream,
-            message_handler=runtime.message_handler,
-        ) as mcp_session:
-            await mcp_session.initialize()
-            logger.info("Connected to gateway MCP server via Streamable HTTP")
+    loop = asyncio.get_running_loop()
 
-            # Inject session and cache into the factory closures
-            _mcp_session_ref.append(mcp_session)
-            shared_cache = SharedCache(
-                mcp_session,
-                tools_factory=lambda: MCPAdapter.get_tools(mcp_session),
-            )
-            _shared_cache_ref.append(shared_cache)
+    def _shutdown() -> None:
+        logger.info("Shutting down...")
+        runtime.stop()
 
-            # Log available tools and prompts
-            tools_result = await mcp_session.list_tools()
-            logger.info("MCP tools: %s", ", ".join(t.name for t in tools_result.tools))
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _shutdown)
+        except (NotImplementedError, RuntimeError):
+            signal.signal(sig, lambda s, f: _shutdown())
 
-            prompts_result = await mcp_session.list_prompts()
-            logger.info("MCP prompts: %s", ", ".join(p.name for p in prompts_result.prompts))
+    logger.info("Chat flows through A2UI __chat surface")
+    logger.info("Gateway MCP:  http://localhost:%d/mcp", MCP_PORT)
+    logger.info("Gateway HTTP: http://localhost:%d", GATEWAY_PORT)
+    logger.info("Agent ID: %s", AGENT_ID)
 
-            # Graceful shutdown
-            loop = asyncio.get_running_loop()
-
-            def _shutdown() -> None:
-                logger.info("Shutting down...")
-                runtime.stop()
-
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                try:
-                    loop.add_signal_handler(sig, _shutdown)
-                except (NotImplementedError, RuntimeError):
-                    # Windows / non-main-thread fallback
-                    signal.signal(sig, lambda s, f: _shutdown())
-
-            logger.info("Chat flows through A2UI __chat surface")
-            logger.info("Gateway MCP:  http://localhost:%d/mcp", MCP_PORT)
-            logger.info("Gateway HTTP: http://localhost:%d", GATEWAY_PORT)
-
-            await runtime.start(mcp_session)
+    await runtime.start()
 
 
 if __name__ == "__main__":

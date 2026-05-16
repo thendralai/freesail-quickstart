@@ -1,6 +1,6 @@
 {
   "name": "freesail-quickstart",
-  "version": "0.8.8",
+  "version": "0.9.1",
   "private": true,
   "description": "Quickstart example for Freesail Agent-driven UI",
   "scripts": {
@@ -33,9 +33,9 @@
     "typescript": "^5.3.0"
   },
   "dependencies": {
-    "@freesail/gateway": "^0.8.0",
-    "@freesail/logger": "^0.8.0",
-    "freesail": "^0.8.0",
+    "@freesail/gateway": "^0.9.1",
+    "@freesail/logger": "^0.9.1",
+    "freesail": "^0.9.1",
     "vite": "^8.0.7"
   }  
 }

@@ -3,7 +3,7 @@ Per-session LangChain agent.
 
 Mirrors agent/src/langchain-agent.ts: one instance is created per connected
 UI session. Handles chat messages and UI actions, runs the LLM + tool loop,
-and pushes streaming updates back to the client via MCP.
+and pushes streaming updates back to the client via the session client.
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from mcp import ClientSession
 
-from runtime import SharedCache
+from adapter import LangChainAdapter
+from runtime import FreesailSessionClient, FreesailToolProvider
 
 logger = logging.getLogger("freesail-agent.session")
 
@@ -75,27 +75,34 @@ class FreesailLangchainSessionAgent:
     def __init__(
         self,
         session_id: str,
-        mcp_session: ClientSession,
+        session: FreesailSessionClient,
         model: Any,
-        shared_cache: SharedCache,
+        runtime: FreesailToolProvider,
         custom_prompt: str = "",
     ) -> None:
         self._session_id = session_id
-        self._mcp_session = mcp_session
+        self._session = session
         self._model = model
-        self._shared_cache = shared_cache
+        self._runtime = runtime
         self._custom_prompt = custom_prompt
 
         # Per-session state
         self._conversation_history: list[HumanMessage | AIMessage | ToolMessage] = []
         self._chat_messages: list[dict[str, str]] = []
 
+        # Interrupt queue: actions/errors that arrive while the agent is mid-turn are
+        # held here and injected into the tool-use loop at the next iteration boundary.
+        self._pending_interrupts: list[str] = []
+        self._is_handling_chat = False
+
+        # Lazy per-session tool binding
+        self._bound_tools_task: asyncio.Task | None = None
+
     # ------------------------------------------------------------------
     # FreesailAgent lifecycle hooks
     # ------------------------------------------------------------------
 
     async def on_session_connected(self, session_id: str) -> None:
-        self._shared_cache.invalidate()
         logger.info("[%s] Session connected — agent ready", session_id)
 
     async def on_session_disconnected(self, session_id: str) -> None:
@@ -103,72 +110,76 @@ class FreesailLangchainSessionAgent:
         self._chat_messages = []
         logger.info("[%s] Session disconnected — agent state cleared", session_id)
 
-    async def on_action(self, action: dict[str, Any]) -> None:
-        # Route chat_send on __chat surface → conversational reply
+    async def on_session_notification(self, notification: dict[str, Any]) -> None:
+        if notification.get("type") == "error":
+            event = notification["event"]
+            path_part = f' (path: {event["path"]})' if event.get("path") else ""
+            message = (
+                f'[System Error] The client reported an error on surface "{event["surfaceId"]}": '
+                f'{event["code"]} — {event["message"]}{path_part}'
+            )
+            logger.info("[%s] Client error: %s on %s", self._session_id, event["code"], event["surfaceId"])
+            await self._enqueue_interrupt(message)
+            return
+
+        action = notification["event"]
+
+        # Route chat_send on __chat surface → conversational reply (always starts a new turn)
         if action.get("name") == "chat_send" and action.get("surfaceId") == "__chat":
             chat_text = (action.get("context") or {}).get("text", "")
             if chat_text:
                 await self._handle_chat(chat_text, is_user_chat=True)
             return
 
+        # Log capabilities when set
+        if action.get("name") == "__capabilities_set":
+            logger.info(
+                "[%s] Capabilities: %s",
+                self._session_id,
+                json.dumps((action.get("context") or {}).get("capabilities")),
+            )
+            return
+
+        # All other UI actions → interrupt queue
         context = action.get("context") or {}
         data_model = action.get("clientDataModel") or {}
 
-        context_str = (
-            f"\nAction data: {json.dumps(context, indent=2)}"
-            if context
-            else ""
-        )
-        data_model_str = (
-            f"\nClient data model: {json.dumps(data_model, indent=2)}"
-            if data_model
-            else ""
-        )
+        context_str = f"\nAction data: {json.dumps(context, indent=2)}" if context else ""
+        data_model_str = f"\nClient data model: {json.dumps(data_model, indent=2)}" if data_model else ""
 
-        # System actions (sourceComponentId == "__system") are directives from the
-        # framework, not user interactions. Format them as explicit correction
-        # instructions so the LLM calls the right tool rather than replying in chat.
-        if action.get("sourceComponentId") == "__system":
-            hint = (action.get("context") or {}).get("message", "")
-            message = (
-                f'[System Directive] The Freesail framework sent a "{action.get("name")}" '
-                f'notification for surface "{action.get("surfaceId")}". '
-                f"You MUST call the appropriate tool to fix this — do NOT reply in chat.\n"
-                f"{hint}{context_str}"
-            )
-        else:
-            message = (
-                f'[UI Action] The user clicked "{action.get("name")}" on component '
-                f'"{action.get("sourceComponentId")}" in surface "{action.get("surfaceId")}".'
-                f"{context_str}{data_model_str}"
-            )
+        message = (
+            f'[UI Action] The user clicked "{action.get("name")}" on component '
+            f'"{action.get("sourceComponentId")}" in surface "{action.get("surfaceId")}".'
+            f"{context_str}{data_model_str}"
+        )
 
         logger.info("[%s] Action: %s", self._session_id, action.get("name"))
-        await self._handle_chat(message, is_user_chat=False)
+        await self._enqueue_interrupt(message)
+
+    # ------------------------------------------------------------------
+    # Interrupt queue
+    # ------------------------------------------------------------------
+
+    async def _enqueue_interrupt(self, message: str) -> None:
+        self._pending_interrupts.append(message)
+        if not self._is_handling_chat:
+            interrupts = self._pending_interrupts[:]
+            self._pending_interrupts.clear()
+            await self._handle_chat("\n".join(interrupts), is_user_chat=False)
 
     # ------------------------------------------------------------------
     # Chat data model helpers
     # ------------------------------------------------------------------
 
     async def _update_chat_model(self, path: str, value: Any) -> None:
-        try:
-            await self._mcp_session.call_tool(
-                "update_data_model",
-                arguments={
-                    "surfaceId": "__chat",
-                    "sessionId": self._session_id,
-                    "path": path,
-                    "value": value,
-                },
-            )
-        except Exception as exc:
-            logger.error("[%s] update_data_model error: %s", self._session_id, exc)
+        await self._session.update_data_model("__chat", path, value)
 
     # ------------------------------------------------------------------
     # Internal chat handler
     # ------------------------------------------------------------------
 
     async def _handle_chat(self, message: str, is_user_chat: bool) -> None:
+        self._is_handling_chat = True
         try:
             if is_user_chat:
                 self._chat_messages.append({
@@ -178,11 +189,11 @@ class FreesailLangchainSessionAgent:
                 })
 
             # Show user message and activate AgentStream
-            await self._update_chat_model("/", {
-                "messages": list(self._chat_messages),
-                "isTyping": True,
-                "stream": {"token": "", "active": True},
-            })
+            await asyncio.gather(
+                self._update_chat_model("/messages", list(self._chat_messages)),
+                self._update_chat_model("/isTyping", True),
+                self._update_chat_model("/stream", {"token": "", "active": True}),
+            )
 
             custom_prompt_section = (
                 f"\n\n{self._custom_prompt.strip()}" if self._custom_prompt.strip() else ""
@@ -193,18 +204,14 @@ class FreesailLangchainSessionAgent:
                 f"When calling ANY tool (create_surface, update_components, update_data_model, delete_surface), "
                 f'you MUST use sessionId: "{self._session_id}". Do NOT reuse a sessionId from a previous message.\n'
                 f"Just reply normally in chat for standard conversation. "
-                f"Only create new surfaces when you think the user needs visual UI.\n\n"
-                f"Today's date is {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+                f"Only create new surfaces when you think the user needs visual UI."
                 f"{custom_prompt_section}\n\n"
                 f"User: {message}"
             )
 
             def on_token(token: str) -> None:
                 # Fire-and-forget — mirrors TS: onToken fires updateChatModel().catch(...)
-                # without awaiting, so streaming is never blocked by MCP round-trips.
-                asyncio.ensure_future(
-                    self._update_chat_model("/stream/token", token)
-                )
+                asyncio.ensure_future(self._update_chat_model("/stream/token", token))
 
             response = await self._chat(session_prompt, on_token=on_token)
 
@@ -217,11 +224,11 @@ class FreesailLangchainSessionAgent:
 
             logger.info("[%s] Assistant: %s...", self._session_id, response[:120] if response else "")
 
-            await self._update_chat_model("/", {
-                "messages": list(self._chat_messages),
-                "isTyping": False,
-                "stream": {"token": "", "active": False},
-            })
+            await asyncio.gather(
+                self._update_chat_model("/messages", list(self._chat_messages)),
+                self._update_chat_model("/isTyping", False),
+                self._update_chat_model("/stream", {"token": "", "active": False}),
+            )
 
         except Exception as exc:
             logger.error("[%s] Chat error: %s", self._session_id, exc)
@@ -230,15 +237,34 @@ class FreesailLangchainSessionAgent:
                 "content": "An error occurred.",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
-            await self._update_chat_model("/", {
-                "messages": list(self._chat_messages),
-                "isTyping": False,
-                "stream": {"token": "", "active": False},
-            })
+            await asyncio.gather(
+                self._update_chat_model("/messages", list(self._chat_messages)),
+                self._update_chat_model("/isTyping", False),
+                self._update_chat_model("/stream", {"token": "", "active": False}),
+            )
+        finally:
+            self._is_handling_chat = False
+            # Drain any interrupts that arrived while we were processing
+            if self._pending_interrupts:
+                interrupts = self._pending_interrupts[:]
+                self._pending_interrupts.clear()
+                await self._handle_chat("\n".join(interrupts), is_user_chat=False)
 
     # ------------------------------------------------------------------
     # LLM execution loop
     # ------------------------------------------------------------------
+
+    async def _get_tools(self) -> list:
+        if self._bound_tools_task is None:
+            async def _bind() -> list:
+                defs = await self._runtime.get_tool_definitions()
+                return LangChainAdapter.bind_tools(defs, self._session)
+            self._bound_tools_task = asyncio.create_task(_bind())
+        try:
+            return await self._bound_tools_task
+        except Exception:
+            self._bound_tools_task = None
+            raise
 
     async def _stream_model_response(
         self,
@@ -246,7 +272,7 @@ class FreesailLangchainSessionAgent:
         messages: list,
         on_token: Callable[[str], None] | None = None,
     ) -> Any:
-        """Stream the model, call on_token for each text piece, return final chunk."""
+        """Stream the model, call on_token for each text token, return final chunk."""
         stream = model_with_tools.astream(messages)
         final_chunk: Any = None
 
@@ -268,7 +294,7 @@ class FreesailLangchainSessionAgent:
                     try:
                         final_chunk = final_chunk + chunk
                     except Exception:
-                        final_chunk = chunk  # fallback: keep last chunk
+                        final_chunk = chunk
         except (AttributeError, TypeError) as exc:
             # langchain-google-genai sometimes emits a trailing finish-reason chunk
             # with no candidate content, raising on 'parts'. Treat as clean stream end.
@@ -282,16 +308,15 @@ class FreesailLangchainSessionAgent:
         user_message: str,
         on_token: Callable[[str], None] | None = None,
     ) -> str:
-        system_prompt = await self._shared_cache.get_system_prompt()
-        current_tools = await self._shared_cache.get_tools()
+        system_prompt = await self._runtime.get_system_prompt()
+        current_tools = await self._get_tools()
         model_with_tools = self._model.bind_tools(current_tools)
 
         self._conversation_history.append(HumanMessage(user_message))
 
         messages = [SystemMessage(system_prompt), *self._conversation_history]
         response_chunk = await self._stream_model_response(model_with_tools, messages, on_token)
-
-        turn_tool_messages: list[AIMessage | ToolMessage] = []
+        turn_tool_messages: list[AIMessage | ToolMessage | HumanMessage] = []
 
         while getattr(response_chunk, "tool_calls", None):
             tool_calls = response_chunk.tool_calls
@@ -299,8 +324,7 @@ class FreesailLangchainSessionAgent:
             if not isinstance(content, str):
                 content = ""
 
-            ai_msg = AIMessage(content=content, tool_calls=tool_calls)
-            turn_tool_messages.append(ai_msg)
+            turn_tool_messages.append(AIMessage(content=content, tool_calls=tool_calls))
 
             tool_result_messages: list[ToolMessage] = []
             for tool_call in tool_calls:
@@ -313,9 +337,7 @@ class FreesailLangchainSessionAgent:
                         tool_args = {}
                 tool_call_id = tool_call.get("id") or tool_name
 
-                matched_tool = next(
-                    (t for t in current_tools if t.name == tool_name), None
-                )
+                matched_tool = next((t for t in current_tools if t.name == tool_name), None)
                 try:
                     if matched_tool:
                         result = str(await matched_tool.ainvoke(tool_args))
@@ -326,23 +348,25 @@ class FreesailLangchainSessionAgent:
                     logger.error("Tool error (%s): %s", tool_name, exc)
 
                 tool_result_messages.append(
-                    ToolMessage(
-                        content=result,
-                        name=tool_name,
-                        tool_call_id=tool_call_id,
-                    )
+                    ToolMessage(content=result, name=tool_name, tool_call_id=tool_call_id)
                 )
 
             turn_tool_messages.extend(tool_result_messages)
+
+            # Inject any interrupts that arrived during tool execution
+            if self._pending_interrupts:
+                interrupts = self._pending_interrupts[:]
+                self._pending_interrupts.clear()
+                turn_tool_messages.append(HumanMessage("\n".join(interrupts)))
+
             response_chunk = await self._stream_model_response(
                 model_with_tools,
                 [SystemMessage(system_prompt), *self._conversation_history, *turn_tool_messages],
                 on_token,
             )
 
-        self._conversation_history.extend(turn_tool_messages)
+        self._conversation_history.extend(turn_tool_messages)  # type: ignore[arg-type]
 
-        # Extract final text
         content = getattr(response_chunk, "content", "") if response_chunk else ""
         if isinstance(content, list):
             assistant_message = "".join(
@@ -352,7 +376,7 @@ class FreesailLangchainSessionAgent:
         elif isinstance(content, str):
             assistant_message = content
         else:
-            assistant_message = ""
+            assistant_message = json.dumps(content) if content else ""
 
         if assistant_message.strip():
             self._conversation_history.append(AIMessage(assistant_message))

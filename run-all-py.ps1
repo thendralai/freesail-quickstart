@@ -35,6 +35,25 @@ if (Test-Path $envFile) {
 # Process tracking for cleanup
 $processes = @()
 
+function Get-PidOnPort {
+    param([int]$Port)
+    # Try Get-NetTCPConnection (Windows, requires no extra modules on Win10+)
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop
+        return $conn.OwningProcess | Select-Object -First 1
+    } catch {}
+    # Fallback: parse netstat output (works on Windows and Linux)
+    try {
+        $lines = & netstat -ano 2>/dev/null
+        foreach ($line in $lines) {
+            if ($line -match "(?:0\.0\.0\.0|127\.0\.0\.1|::):$Port\s+.*LISTEN\w*\s+(\d+)") {
+                return [int]$Matches[1]
+            }
+        }
+    } catch {}
+    return $null
+}
+
 function Cleanup {
     Write-Host ""
     Write-Host "Shutting down..." -ForegroundColor Yellow
@@ -113,6 +132,14 @@ if ($env:LOG_FILTER) {
 
 # 1. Start Gateway
 Write-Host "[Gateway] Starting on HTTP port $GATEWAY_HTTP_PORT, MCP port $GATEWAY_MCP_PORT" -ForegroundColor Blue
+foreach ($port in @($GATEWAY_HTTP_PORT, $GATEWAY_MCP_PORT)) {
+    $pid_ = Get-PidOnPort -Port $port
+    if ($pid_) {
+        Write-Host "[Gateway] Port $port in use by PID $pid_, killing..." -ForegroundColor Yellow
+        Stop-Process -Id ([int]$pid_) -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
+}
 $gateway = Start-Process -FilePath "npx" -ArgumentList $gatewayArgs -PassThru -NoNewWindow
 $processes += $gateway
 
@@ -122,9 +149,19 @@ Start-Sleep -Seconds 3
 # 2. Start Python Agent
 Write-Host "[Agent] Starting Python agent" -ForegroundColor Blue
 $agentDir = Join-Path $ScriptDir "python-agent"
-# Install dependencies first
-$pip = Start-Process -FilePath "pip" -ArgumentList "install", "-q", "-r", "requirements.txt" -WorkingDirectory $agentDir -PassThru -NoNewWindow -Wait
-$agent = Start-Process -FilePath "python" -ArgumentList "main.py" -WorkingDirectory $agentDir -PassThru -NoNewWindow
+$venvDir = Join-Path $ScriptDir ".venv"
+if ($IsWindows) {
+    $venvPython = Join-Path $venvDir "Scripts\python.exe"
+} else {
+    $venvPython = Join-Path $venvDir "bin/python"
+}
+if (-not (Test-Path $venvPython)) {
+    Write-Host "[Agent] Creating Python virtual environment..." -ForegroundColor Blue
+    & python3 -m venv $venvDir
+    if ($LASTEXITCODE -ne 0) { & python -m venv $venvDir }
+}
+Start-Process -FilePath $venvPython -ArgumentList "-m", "pip", "install", "-q", "-r", "requirements.txt" -WorkingDirectory $agentDir -NoNewWindow -Wait
+$agent = Start-Process -FilePath $venvPython -ArgumentList "main.py" -WorkingDirectory $agentDir -PassThru -NoNewWindow
 $processes += $agent
 
 Start-Sleep -Seconds 3
